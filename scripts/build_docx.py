@@ -49,7 +49,11 @@ UPRIGHT_TOKENS = {
 }
 
 # s2t 檢查的已知誤報：這些字在繁體亦正確（OpenCC 仍視為簡體映射）
-S2T_FALSE_POSITIVES = {"皂"}   # 肥皂（泡）：繁體正字
+S2T_FALSE_POSITIVES = {
+    "皂",   # 肥皂（泡）：繁體正字
+    "干",   # 若干：繁體正字（OpenCC 視為「乾/幹」簡化映射）
+    "游",   # 上游/游泳：繁體正字（OpenCC 視為「遊」簡化映射）
+}
 
 try:
     from opencc import OpenCC
@@ -75,7 +79,15 @@ _TAG = re.compile(r"(\*\*|\{/?i\}|\{/?sub\}|\{/?sup\}|\{/?p\}|\{/?eq\}|\{/?eqd\}
 # ---------------- 線性數學語法 -> OMML（Word 方程式） ----------------
 # {eq}GMm/R^2 = m(2π/T_2)^2 h{/eq}  →  行內 Word 方程式物件
 # {eqd}M = 4π^2h^3/GT_2^2{/eqd}     →  置中展示方程式
-# 語法：^ 上標、_ 下標、/ 分式（左結合）、() 分組、字母/數字/運算符直寫
+# 語法：^ 上標、_ 下標、/ 分式、() 分組、字母/數字/運算符直寫
+#
+# 已實證的寫法陷阱（A1/A2 兩輪對照實驗，違者渲染必錯）：
+#   1. 多字元下標必須加括號：v_(0y)、x_(CM)、F_(外1)
+#      （裸寫 v_0y 只會把 0 放下標，y 留在基線）
+#   2. 分式後面還有因子時必須分組：(1/2) gt^2
+#      （裸寫 1/2 gt^2 會整串被吞進分母）
+#   3. 根號：√ 是前綴運算子，作用範圍是「下一個 atom 及其上下標」：
+#      √(2gR)、√x^2（= √(x^2)）；根號內多項式一律加括號
 M_NS = "http://schemas.openxmlformats.org/officeDocument/2006/math"
 
 
@@ -86,11 +98,25 @@ def _m(tag):
 class _MathOMML:
     """小型的線性數學語法 -> OMML 產生器。"""
 
-    TOK = re.compile(r"[A-Za-zΑ-Ωα-ω]+|\d+(?:\.\d+)?|[()^_/=+\-·×]")
+    TOK = re.compile(
+        r"[A-Za-zΑ-Ωα-ωℓ⊥∞′″…⋮→←∝一-鿿；：:≈><≥≤\u0300-\u036f]+|\d+(?:\.\d+)?|[()^_/=+\-·×±∓√]")
 
     def __init__(self, text):
+        # ASCII 撇號在數學語境一律視為撇號（prime）：v' -> v′（U+2032，已在收錄範圍）
+        text = text.replace("'", "′")
         self.toks = self.TOK.findall(text)
         self.pos = 0
+        # 防呆：token 之外的字元會被靜默丟棄（A2 整理時發現 ±∓ 被吃掉），
+        # 必須大聲警告而不是默默產生缺字的方程式
+        covered = set()
+        for m in self.TOK.finditer(text):
+            covered.update(range(m.start(), m.end()))
+        dropped = [ch for i, ch in enumerate(text)
+                   if i not in covered and not ch.isspace()]
+        if dropped:
+            import sys
+            print(f"WARNING 方程式有未識別字元被丟棄：{dropped} ← {text!r}",
+                  file=sys.stderr)
 
     def peek(self):
         return self.toks[self.pos] if self.pos < len(self.toks) else None
@@ -100,17 +126,19 @@ class _MathOMML:
         self.pos += 1
         return t
 
-    # ---- 語法（優先級：上下標 > 分式 > 乘除並置 > 關係/加減運算符）----
-    # expr    := product (('='|'+'|'-'|'−'|'·'|'×') product)*
+    # ---- 語法（優先級：根號 > 上下標 > 分式 > 乘除並置 > 關係/加減運算符）----
+    # expr    := product (('='|'+'|'-'|'−'|'±'|'∓'|'·'|'×'|'∝') product)*
     # product := term ('/' term)*        分式左結合；並置因子相乘
     # term    := atom (^_ 後綴)*
-    # atom    := 字|數|(expr)
+    # atom    := √ atom (^_ 後綴)* | 字|數|(expr)
+    _BINOPS = ("=", "+", "-", "−", "±", "∓", "·", "×", "∝")
+
     def parse(self):
         return self._expr()
 
     def _expr(self):
         nodes = self._product()
-        while self.peek() in ("=", "+", "-", "−", "·", "×"):
+        while self.peek() in self._BINOPS:
             nodes.append(self._run(self.next()))
             nodes.extend(self._product())
         return nodes
@@ -123,7 +151,7 @@ class _MathOMML:
             if t == "/":
                 self.next()
                 left = [self._frac(left, self._factors())]
-            elif t is not None and t not in (")", "=", "+", "-", "−", "·", "×"):
+            elif t is not None and t not in (")",) + self._BINOPS:
                 left.append(self._term())
             else:
                 break
@@ -133,7 +161,7 @@ class _MathOMML:
         nodes = []
         while True:
             t = self.peek()
-            if t is None or t in (")", "/", "=", "+", "-", "−", "·", "×"):
+            if t is None or t in (")", "/") + self._BINOPS:
                 break
             nodes.append(self._term())
         return nodes
@@ -154,6 +182,21 @@ class _MathOMML:
 
     def _atom(self):
         t = self.peek()
+        if t == "√":
+            self.next()
+            inner = self._atom()
+            # 根號內容的上下標歸根號管：√x^2 = √(x^2)
+            while self.peek() in ("^", "_"):
+                if self.next() == "^":
+                    inner = self._ssup(inner, self._atom())
+                else:
+                    sub = self._atom()
+                    if self.peek() == "^":
+                        self.next()
+                        inner = self._ssubsup(inner, sub, self._atom())
+                    else:
+                        inner = self._ssub(inner, sub)
+            return self._rad(inner)
         if t == "(":
             self.next()
             inner = self._expr()
@@ -219,9 +262,32 @@ class _MathOMML:
 
     @classmethod
     def _delim(cls, inner):
+        # 明確寫出 begChr/endChr：省略 dPr 雖合規，但 LibreOffice 會渲染成 |x|
         e = cls._el("d")
+        dpr = cls._el("dPr")
+        beg = cls._el("begChr")
+        beg.set(_m("val"), "(")
+        end = cls._el("endChr")
+        end.set(_m("val"), ")")
+        dpr.append(beg)
+        dpr.append(end)
+        e.append(dpr)
         e.append(cls._wrap("e", inner))
         return e
+
+    @classmethod
+    def _rad(cls, inner):
+        # 平方根：Word 的標準寫法是 radPr/degHide + 空 m:deg + m:e。
+        # 省略 m:deg 雖合規，但 LibreOffice 的 OMML 匯入會錯位（內容變方塊）
+        r = cls._el("rad")
+        rpr = cls._el("radPr")
+        dh = cls._el("degHide")
+        dh.set(_m("val"), "1")
+        rpr.append(dh)
+        r.append(rpr)
+        r.append(cls._el("deg"))
+        r.append(cls._wrap("e", inner if isinstance(inner, list) else [inner]))
+        return r
 
 
 def linear_math_to_omml(text, display=False):
@@ -235,6 +301,57 @@ def linear_math_to_omml(text, display=False):
     para = etree.Element(_m("oMathPara"))
     para.append(omath)
     return para
+
+
+def omml_to_linear(omath):
+    """OMML 結構樹 -> 線性字串（linear_math_to_omml 的逆向，結構複驗用）。
+
+    逐條比對 lin(linear_math_to_omml("v_(0y)")) 與預期字串，
+    可抓到下標/分式分組等結構錯誤。
+    ⚠️ 只驗證「結構正確」，不保證 Word 實際渲染正確——Quick Look 不渲染
+    OMML，最終品質閘門永遠是匯出 PDF 逐頁目視（A1 的教訓：結構全對、
+    渲染系統性出錯，只靠用戶匯出的 PDF 才抓到）。
+    """
+    def lin(e):
+        if e is None:
+            return ""
+        tag = etree.QName(e).localname
+        if tag == "r":
+            return e.findtext(_m("t")) or ""
+        if tag == "f":
+            return f"({lin(e.find(_m('num')))})/({lin(e.find(_m('den')))})"
+        if tag == "sSub":
+            return f"{lin(e.find(_m('e')))}_({lin(e.find(_m('sub')))})"
+        if tag == "sSup":
+            return f"{lin(e.find(_m('e')))}^({lin(e.find(_m('sup')))})"
+        if tag == "sSubSup":
+            return (f"{lin(e.find(_m('e')))}_({lin(e.find(_m('sub')))})"
+                    f"^({lin(e.find(_m('sup')))})")
+        if tag == "d":
+            return f"({lin(e.find(_m('e')))})"
+        if tag == "rad":
+            return f"√({lin(e.find(_m('e')))})"
+        # num/den/e/sub/sup/oMath/oMathPara 及其他：串接子節點
+        return "".join(lin(c) for c in e)
+
+    return lin(omath)
+
+
+def list_docx_equations(docx_path):
+    """列出成品 docx 中所有 OMML 方程式的線性形式，供逐條與原題核對。
+
+    用法：build 腳本在 self_check 之後呼叫，或互動式檢查已交付的 docx。
+    同時是「同型錯掃描」的入口：發現一條渲染錯，先懷疑解析規則有洞
+    （見 _MathOMML 開頭的寫法陷阱），再從本清單全文掃同型寫法——
+    錯誤是系統性的，不是隨機的。
+    """
+    with zipfile.ZipFile(docx_path) as z:
+        root = etree.fromstring(z.read("word/document.xml"))
+    lines = [omml_to_linear(om) for om in root.iter(_m("oMath"))]
+    for i, s in enumerate(lines, 1):
+        print(f"{i:3d}. {s}")
+    print(f"共 {len(lines)} 條方程式")
+    return lines
 
 
 def parse_markup(text):
@@ -363,8 +480,11 @@ class WorksheetBuilder:
         p.add_run().add_picture(
             f"{self.crops_dir}/{fname}", width=Cm(width_cm))
         if caption:
+            # 圖註不設 keep_with_next：否則圖+註會把後續段落整串拖走，
+            # 留下整頁空白（A2-02 實證）。圖片本身 keep_next 已足以
+            # 保證「圖在、註在」（註緊跟圖之後）
             self._para(caption, size=self.cfg["caption_size"],
-                       align="center", keep_next=True)
+                       align="center")
 
     def question(self, label, stem, opts=None, subs=None, figs=None):
         """figs: [dict(file="xxx.png", w=寬cm, cap="甲" 或 None)]"""

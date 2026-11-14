@@ -30,8 +30,9 @@ worksheet-docx/
 └── scripts/
     ├── diagnose_pdf.py   # 階段 0：診斷 PDF（文字層 vs 截圖型）
     ├── crop_figures.py   # 階段 2：插圖裁切（單張或 boxes.json 批次）
-    ├── build_docx.py     # 階段 3：docx 構建函式庫（含四項自動檢查）
-    ├── verify_docx.py    # 階段 4：複驗（OS 分支匯出 PDF＋逐頁渲染）
+    ├── build_docx.py     # 階段 3：docx 構建函式庫（四項自動檢查＋OMML 線性語法
+    │                     #           與 list_docx_equations 結構複驗）
+    ├── verify_docx.py    # 階段 4：複驗（OS 分支匯出 PDF／--thumb 縮圖＋逐頁渲染）
     └── example_build.py  # 內容填寫範本（每次任務複製改造）
 ```
 
@@ -40,8 +41,11 @@ worksheet-docx/
 1. `python scripts/diagnose_pdf.py 輸入.pdf` — 判定輸入類型
 2. 依 SKILL.md「階段 1」與用戶確認術語/字體/簡繁（先 grep 用戶現有講義推導術語）
 3. 直讀圖片轉錄題目，`crop_figures.py` 裁插圖並**逐張目視複驗**
-4. 複製 `example_build.py` 填入內容，執行（內建 self_check）
+4. 複製 `example_build.py` 填入內容，執行（內建 self_check）；再用
+   `list_docx_equations(成品.docx)` 逐條核對方程式結構
 5. `python scripts/verify_docx.py 成品.docx --export-pdf --render`，**逐頁目視**渲染圖
+   （AppleScript 匯出不可用的機器：改 `--thumb`＋請用戶手動匯出 PDF 回傳後 `--render`；
+   ⚠️ 縮圖不渲染 OMML 方程式，方程式正確與否只能以 PDF 目視為準）
 6. 原位部署
 
 ## 排版預設（可於 build_docx.py 修改）
@@ -60,7 +64,8 @@ worksheet-docx/
 
 - 圖片內的點陣文字（圖題、坐標軸）無法改字體或轉繁體
 - 手寫/低解析度掃描需人工校對數字與符號
-- 複雜公式以線性格式（3L/4、√2、10⁻²）呈現
+- OMML 方程式支援分式、上下標、根號類排版；矩陣/多行對齊/向量組合符號需 Word 手動精修，
+  或退而用線性上標下標（3L/4、√2、10⁻²）
 
 ## License
 

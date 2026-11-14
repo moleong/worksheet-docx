@@ -2,15 +2,21 @@
 """verify_docx.py — 複驗成品 docx（worksheet-docx skill）
 
 用法：
-    python verify_docx.py 成品.docx [--export-pdf] [--render] [--outdir 目錄]
+    python verify_docx.py 成品.docx [--export-pdf] [--render] [--thumb] [--outdir 目錄]
 
 流程（SKILL.md 階段 4）：
 1. 結構檢查：圖片數、字體、斜體 run、段落間距
 2. --export-pdf：依 OS 分支匯出 PDF
-     - macOS  → Pages AppleScript（本機 Word AppleScript 已知故障，不用 Word）
+     - macOS  → 預設 LibreOffice 無頭模式（`brew install --cask libreoffice`）；
+       無 LibreOffice 時降級 Pages AppleScript
      - Windows → Word COM（PowerShell）
+   ⚠️ 部分機器 Pages/Word AppleScript 會逾時（-1712，疑似權限/對話框）：
+   降級為 --thumb 結構總覽＋請用戶手動匯出 PDF 後再 --render 逐頁目視
 3. --render：PyMuPDF 渲染逐頁 PNG 到 <outdir>/pages/，供 agent 逐頁目視
    （必須用圖片檢視工具逐頁看過，才算完成複驗）
+4. --thumb：Quick Look 縮圖（qlmanage），快速總覽版面/圖文位置。
+   ⚠️ Quick Look 不渲染 OMML 方程式（顯示空白屬正常）——不能以此判定
+   方程式正確，方程式真實渲染只能靠匯出 PDF 目視
 """
 import argparse
 import os
@@ -35,6 +41,37 @@ def structural_check(path):
 
 
 def export_pdf_mac(docx_path, pdf_path):
+    # 路徑 1：LibreOffice 無頭模式（推薦：不需 AppleScript 權限，可完全自動化；
+    # 需 FONTCONFIG_FILE 指向含 macOS 字體目錄的設定，否則 CJK 空白）
+    soffice = "/Applications/LibreOffice.app/Contents/MacOS/soffice"
+    if os.path.exists(soffice):
+        import glob
+        fc = os.path.expanduser("/tmp/fontconfig/fonts.conf")
+        env = dict(os.environ)
+        if not os.path.exists(fc):
+            os.makedirs("/tmp/fontconfig/cache", exist_ok=True)
+            fonts_conf = """<?xml version="1.0"?>
+<!DOCTYPE fontconfig SYSTEM "fonts.dtd">
+<fontconfig>
+  <cachedir>/tmp/fontconfig/cache</cachedir>
+  <dir>/System/Library/Fonts</dir>
+  <dir>/System/Library/Fonts/Supplemental</dir>
+  <dir>/Library/Fonts</dir>
+  <dir>HOME/Library/Fonts</dir>
+</fontconfig>"""
+            open(fc, "w").write(fonts_conf.replace("HOME", os.path.expanduser("~")))
+        env["FONTCONFIG_FILE"] = fc
+        subprocess.run([soffice, "--headless", "--convert-to", "pdf",
+                        "--outdir", os.path.dirname(pdf_path), docx_path],
+                       check=True, env=env, capture_output=True)
+        produced = os.path.join(os.path.dirname(pdf_path),
+                                os.path.splitext(os.path.basename(docx_path))[0] + ".pdf")
+        if produced != pdf_path:
+            os.replace(produced, pdf_path)
+        return
+
+    # 路徑 2：Pages AppleScript（部分 Mac 的 Word AppleScript 故障回 -1708，
+    # 不要嘗試 Word 路徑；若 Pages 亦逾時 -1712，本函數會拋出，main 有降級提示）
     script = f'''
 tell application "Pages"
     activate
@@ -81,11 +118,20 @@ def render_pages(pdf_path, outdir, dpi=100):
     return paths
 
 
+def quicklook_thumbs(docx_path, outdir):
+    """Quick Look 縮圖：快速總覽版面與圖文位置（不能取代 PDF 目視）。"""
+    os.makedirs(outdir, exist_ok=True)
+    subprocess.run(["qlmanage", "-t", "-s", "1200", "-o", outdir, docx_path],
+                   check=True)
+    print(f"縮圖已輸出到 {outdir}/（⚠️ 方程式區域空白屬正常——Quick Look 不渲染 OMML）")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("docx")
     ap.add_argument("--export-pdf", action="store_true")
     ap.add_argument("--render", action="store_true")
+    ap.add_argument("--thumb", action="store_true")
     ap.add_argument("--outdir", default=None)
     args = ap.parse_args()
 
@@ -108,7 +154,11 @@ def main():
                 sys.exit(f"不支援的平台 {system}：請手動開啟 Word 匯出 PDF")
             print(f"PDF：{pdf_path}")
         except Exception as e:
-            sys.exit(f"匯出失敗（{e}）。降級方案：結構檢查＋請用戶自行開啟目視。")
+            sys.exit(f"匯出失敗（{e}）。降級方案：--thumb 結構總覽＋"
+                     "請用戶手動匯出 PDF 後再 --render 逐頁目視。")
+
+    if args.thumb:
+        quicklook_thumbs(docx_path, outdir)
 
     if args.render:
         if not os.path.exists(pdf_path):

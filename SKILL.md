@@ -138,6 +138,20 @@ python scripts/verify_docx.py 成品.docx --export-pdf --render
   避免「重裁了圖但 docx 仍嵌舊圖」的狀態漂移
 - 複驗後原位部署（預設同名替換）
 
+### 階段 5｜合併成冊（可選）
+
+分章驗證完成後，用 `merge_docx.py` 把多章合併成單冊（**純搬運不重產內容**）：
+
+```bash
+python scripts/merge_docx.py 泛珠補充A1.docx 章1.docx 章2.docx … \
+    --header "泛珠補充A1" --title "01 斜拋運動" --title "02 …" …
+```
+
+- 第一章為基底；之後每章前加分頁符；圖片關係自動重映射（依內容去重）
+- 每章標題文字依 `--title` 替換（如「泛珠補充 A1｜01 斜拋運動（學生版）」→「01 斜拋運動」），保留字級
+- `--header` 新增置左 10 pt 頁首，全冊每頁自動出現
+- 合併後照階段 4 匯出 PDF 複驗：每頁頁首字串、章標題齊全、圖片總數=分章之和
+
 ## 避雷清單（已實證的坑）
 
 1. **`textutil -convert docx` 不嵌入圖片**（macOS 內建工具會靜默丟圖）——務必用 python-docx

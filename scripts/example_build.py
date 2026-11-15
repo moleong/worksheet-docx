@@ -67,4 +67,10 @@ wb.question(
 # ---- 構建 + 四項自動檢查（全 OK 才進入複驗）----
 wb.save(OUT)
 ok = wb.self_check(OUT)
+
+# ---- 方程式結構自動傾印（品質閘門之一：輸出必須逐條與原卷公式對照，
+#      見 SKILL.md 階段 4 硬性複驗清單。有 OMML 的 build 腳本一律保留此段）----
+from build_docx import list_docx_equations
+list_docx_equations(OUT)
+
 sys.exit(0 if ok else 1)

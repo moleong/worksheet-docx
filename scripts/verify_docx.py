@@ -5,7 +5,8 @@
     python verify_docx.py 成品.docx [--export-pdf] [--render] [--thumb] [--outdir 目錄]
 
 流程（SKILL.md 階段 4）：
-1. 結構檢查：圖片數、字體、斜體 run、段落間距
+1. 結構檢查：圖片數、字體、斜體 run、段落間距，並自動傾印全部 OMML 方程式
+   線性化清單（須逐條與原卷公式對照，見 SKILL.md 階段 4 硬性複驗清單）
 2. --export-pdf：依 OS 分支匯出 PDF
      - macOS  → 預設 LibreOffice 無頭模式（`brew install --cask libreoffice`）；
        無 LibreOffice 時降級 Pages AppleScript
@@ -140,6 +141,15 @@ def main():
     pdf_path = os.path.splitext(docx_path)[0] + "_verify.pdf"
 
     structural_check(docx_path)
+
+    # 複驗報告自動附 OMML 方程式清單（SKILL.md 階段 4 硬性複驗清單：
+    # 逐條與原卷公式對照後才算完成複驗）
+    try:
+        from build_docx import list_docx_equations
+        print("\n---- OMML 方程式清單（須逐條對照原卷公式）----")
+        list_docx_equations(docx_path)
+    except Exception as e:
+        print(f"（方程式清單傾印失敗：{e}）")
 
     if args.export_pdf:
         system = platform.system()

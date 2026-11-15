@@ -84,10 +84,18 @@ _TAG = re.compile(r"(\*\*|\{/?i\}|\{/?sub\}|\{/?sup\}|\{/?p\}|\{/?eq\}|\{/?eqd\}
 # 已實證的寫法陷阱（A1/A2 兩輪對照實驗，違者渲染必錯）：
 #   1. 多字元下標必須加括號：v_(0y)、x_(CM)、F_(外1)
 #      （裸寫 v_0y 只會把 0 放下標，y 留在基線）
-#   2. 分式後面還有因子時必須分組：(1/2) gt^2
-#      （裸寫 1/2 gt^2 會整串被吞進分母）
+#   2. 裸因子開頭的分母會向右延伸至下一個運算符（仿 Word 線性輸入）：
+#      1/2 gt^2 = 1/(2·g·t^2)；要表示相乘請寫 (1/2) gt^2
+#      （括號群組作分母只取該群組：1/(2x) y = (1/(2x))·y，不會被吞；
+#        校際 2022 曾因舊版解析器把括號後的因子吞進分母而全題重建——
+#        修改 _product 的分母規則後必跑 test_math_omml.py）
 #   3. 根號：√ 是前綴運算子，作用範圍是「下一個 atom 及其上下標」：
 #      √(2gR)、√x^2（= √(x^2)）；根號內多項式一律加括號
+#   4. 上標/下標/根號的運算元自動吸收前置正負號：10^-2 = 10^(-2)、e^-x、√-2；
+#      運算元位置出現 = / ^ _ · × 等運算符必為手誤，印 WARNING（運算元守衛）。
+#      U+2212（−）與連字號（-）皆收錄；未收錄字元會印 WARNING 並丟棄——
+#      看到 WARNING 不可無視（PA-H101 實證）。組合符號 a⃗ 請改用 vec(a)（m:acc）。
+#      前置一元符號（-GMm/r^2 的 -GMm）維持 run 串接，視覺正確，屬已知慣例
 M_NS = "http://schemas.openxmlformats.org/officeDocument/2006/math"
 
 
@@ -99,11 +107,12 @@ class _MathOMML:
     """小型的線性數學語法 -> OMML 產生器。"""
 
     TOK = re.compile(
-        r"[A-Za-zΑ-Ωα-ωℓ⊥∞′″…⋮→←∝一-鿿；：:≈><≥≤\u0300-\u036f]+|\d+(?:\.\d+)?|[()^_/=+\-·×±∓√]")
+        r"[A-Za-zΑ-Ωα-ωℓ⊥∞′″…⋮→←∝一-鿿；：:≈><≥≤\u0300-\u036f]+|\d+(?:\.\d+)?|[()^_/=+\-−·×±∓√]")
 
     def __init__(self, text):
         # ASCII 撇號在數學語境一律視為撇號（prime）：v' -> v′（U+2032，已在收錄範圍）
         text = text.replace("'", "′")
+        self.src = text
         self.toks = self.TOK.findall(text)
         self.pos = 0
         # 防呆：token 之外的字元會被靜默丟棄（A2 整理時發現 ±∓ 被吃掉），
@@ -128,10 +137,17 @@ class _MathOMML:
 
     # ---- 語法（優先級：根號 > 上下標 > 分式 > 乘除並置 > 關係/加減運算符）----
     # expr    := product (('='|'+'|'-'|'−'|'±'|'∓'|'·'|'×'|'∝') product)*
-    # product := term ('/' term)*        分式左結合；並置因子相乘
+    # product := factors (('/' den))*    分式左結合；並置因子相乘
+    #   den   := '(' 群組 term | factors
+    #   '/' 分母：以 '(' 群組開頭只取該群組（群組 ')' 即封閉）；裸因子則向右
+    #   延伸至下一個運算符（1/2 gt^2 = 1/(2·g·t^2)，仿 Word 線性輸入）
     # term    := atom (^_ 後綴)*
-    # atom    := √ atom (^_ 後綴)* | 字|數|(expr)
+    # atom    := √ atom (^_ 後綴)* | vec|hat|dot|bar '(' expr ')' | 字|數|(expr)
     _BINOPS = ("=", "+", "-", "−", "±", "∓", "·", "×", "∝")
+    # 裝飾函數 -> m:acc 的 chr（組合字元，與 Word 內建裝飾一致）：
+    # vec=組合右箭頭（U+20D7）、hat=組合揚抑符（U+0302）、dot=組合上點（U+0307）、
+    # bar=組合上橫線（U+0305）
+    _ACCENTS = {"vec": "⃗", "hat": "̂", "dot": "̇", "bar": "̅"}
 
     def parse(self):
         return self._expr()
@@ -144,13 +160,18 @@ class _MathOMML:
         return nodes
 
     def _product(self):
-        # 並置因子相乘；'/' 分式：左、右各取一個完整乘積，左結合
+        # 並置因子相乘；'/' 分式：分子取已累積的完整乘積（左結合），
+        # 分母仿 Word 線性輸入的增量構建——以 '(' 群組開頭只取該群組
+        # （群組在 ')' 即封閉，後續因子不會被吞進分母）；
+        # 裸因子開頭則向右延伸至下一個運算符（1/2 gt^2 = 1/(2·g·t^2)，
+        # 與 Word 行為一致，要寫 (1/2) gt^2 才表示相乘）
         left = self._factors()
         while True:
             t = self.peek()
             if t == "/":
                 self.next()
-                left = [self._frac(left, self._factors())]
+                den = [self._term()] if self.peek() == "(" else self._factors()
+                left = [self._frac(left, den)]
             elif t is not None and t not in (")",) + self._BINOPS:
                 left.append(self._term())
             else:
@@ -170,30 +191,42 @@ class _MathOMML:
         node = self._atom()
         while self.peek() in ("^", "_"):
             if self.next() == "^":
-                node = self._ssup(node, self._atom())
+                node = self._ssup(node, self._signed_operand())
             else:
-                sub = self._atom()
+                sub = self._signed_operand()
                 if self.peek() == "^":           # _ 後接 ^ → 上下標
                     self.next()
-                    node = self._ssubsup(node, sub, self._atom())
+                    node = self._ssubsup(node, sub, self._signed_operand())
                 else:
                     node = self._ssub(node, sub)
         return node
+
+    def _signed_operand(self):
+        """^/_ 運算元位置吸收前置正負號：10^-2 -> 10^(-2)、e^-x -> e^(-x)。
+
+        回傳元素清單（_ssup/_ssub/_ssubsup 的 sup/sub 內容原生接受清單）。
+        factor 開頭的符號（如 = -GMm/r^2 的 -GMm）維持 run 串接——視覺正確，
+        屬已知慣例（見 SKILL.md 寫法陷阱）。
+        """
+        if self.peek() in ("-", "−", "+"):
+            sign = self.next()
+            return [self._run(sign), self._atom()]
+        return self._atom()
 
     def _atom(self):
         t = self.peek()
         if t == "√":
             self.next()
-            inner = self._atom()
+            inner = self._signed_operand()
             # 根號內容的上下標歸根號管：√x^2 = √(x^2)
             while self.peek() in ("^", "_"):
                 if self.next() == "^":
-                    inner = self._ssup(inner, self._atom())
+                    inner = self._ssup(inner, self._signed_operand())
                 else:
-                    sub = self._atom()
+                    sub = self._signed_operand()
                     if self.peek() == "^":
                         self.next()
-                        inner = self._ssubsup(inner, sub, self._atom())
+                        inner = self._ssubsup(inner, sub, self._signed_operand())
                     else:
                         inner = self._ssub(inner, sub)
             return self._rad(inner)
@@ -203,6 +236,17 @@ class _MathOMML:
             if self.peek() == ")":
                 self.next()
             return self._delim(inner)
+        if t in self._ACCENTS and self.toks[self.pos + 1: self.pos + 2] == ["("]:
+            # 裝飾函數：vec(v)、vec(AB)、hat(F) -> m:acc（只接受 '(' 群組形式，
+            # 與 √ 的多項式規則一致，避免單字母省略括號的歧義）
+            self.next()  # 函數名
+            return self._acc(self._ACCENTS[t], self._atom())
+        if t in self._BINOPS + ("/", "^", "_") and t not in ("-", "−", "+"):
+            # 運算元守衛：= / ^ / _ / · / × / ∝ 出現在運算元位置幾乎必為手誤
+            # （正負號已在 _signed_operand 吸收；factor 開頭的正負號是合法一元符號）
+            import sys
+            print(f"WARNING 運算元位置出現運算符 {t!r}，結構可能非預期 ← {self.src!r}",
+                  file=sys.stderr)
         self.next()
         return self._run(t)
 
@@ -258,6 +302,19 @@ class _MathOMML:
         e.append(cls._wrap("e", base if isinstance(base, list) else [base]))
         e.append(cls._wrap("sub", sub if isinstance(sub, list) else [sub]))
         e.append(cls._wrap("sup", sup if isinstance(sup, list) else [sup]))
+        return e
+
+    @classmethod
+    def _acc(cls, chr_val, inner):
+        # 裝飾（向量箭頭/帽子/點/橫線）：chr 用組合字元，與 Word 內建裝飾一致。
+        # LibreOffice 相容性以 verify_docx.py 實測為準（spike 已驗證 Pages 正常）
+        e = cls._el("acc")
+        apr = cls._el("accPr")
+        chr_e = cls._el("chr")
+        chr_e.set(_m("val"), chr_val)
+        apr.append(chr_e)
+        e.append(apr)
+        e.append(cls._wrap("e", inner if isinstance(inner, list) else [inner]))
         return e
 
     @classmethod
@@ -329,6 +386,12 @@ def omml_to_linear(omath):
                     f"^({lin(e.find(_m('sup')))})")
         if tag == "d":
             return f"({lin(e.find(_m('e')))})"
+        if tag == "acc":
+            chr_val = e.find(_m("accPr") + "/" + _m("chr"))
+            name = next((k for k, v in _MathOMML._ACCENTS.items()
+                         if chr_val is not None and chr_val.get(_m("val")) == v),
+                        f"acc{chr_val.get(_m('val')) if chr_val is not None else '?'}")
+            return f"{name}({lin(e.find(_m('e')))})"
         if tag == "rad":
             return f"√({lin(e.find(_m('e')))})"
         # num/den/e/sub/sup/oMath/oMathPara 及其他：串接子節點
